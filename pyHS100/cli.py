@@ -151,7 +151,7 @@ def find_host_from_alias(alias, target="255.255.255.255", timeout=1, attempts=3)
         click.echo(f"Attempt {attempt} of {attempts}")
         found_devs = Discover.discover(target=target, timeout=timeout).items()
         for ip, dev in found_devs:
-            if dev.sync.get_alias().lower() == alias.lower():
+            if dev.alias.lower() == alias.lower():
                 host = dev.host
                 return host
     return None
@@ -170,12 +170,7 @@ def sysinfo(dev):
 @click.pass_context
 def state(ctx, dev: SmartDevice):
     """Print out device state and versions."""
-    click.echo(
-        click.style(
-            "== {} - {} ==".format(dev.sync.get_alias(), dev.sync.get_model()),
-            bold=True,
-        )
-    )
+    click.echo(click.style("== {} - {} ==".format(dev.alias, dev.model), bold=True))
 
     click.echo(
         click.style(
@@ -186,7 +181,7 @@ def state(ctx, dev: SmartDevice):
     if dev.is_strip:
         for plug in dev.plugs:  # type: ignore
             is_on = plug.sync.get_is_on()
-            alias = plug.sync.get_alias()
+            alias = plug.alias
             click.echo(
                 click.style(
                     "  * {} state: {}".format(alias, ("ON" if is_on else "OFF")),
@@ -195,15 +190,15 @@ def state(ctx, dev: SmartDevice):
             )
 
     click.echo(f"Host/IP: {dev.host}")
-    for k, v in dev.sync.get_state_information().items():
+    for k, v in dev.sync.state_information.items():
         click.echo(f"{k}: {v}")
-    hw_info = dev.sync.get_hw_info()
+    hw_info = dev.sync.hw_info
     click.echo(click.style("== Generic information ==", bold=True))
     click.echo("Time:         {}".format(dev.sync.get_time()))
     click.echo("Hardware:     {}".format(hw_info["hw_ver"]))
     click.echo("Software:     {}".format(hw_info["sw_ver"]))
-    click.echo("MAC (rssi):   {} ({})".format(dev.sync.get_mac(), dev.sync.get_rssi()))
-    click.echo("Location:     {}".format(dev.sync.get_location()))
+    click.echo("MAC (rssi):   {} ({})".format(dev.sync.mac, dev.sync.rssi))
+    click.echo("Location:     {}".format(dev.sync.location))
 
     ctx.invoke(emeter)
 
@@ -217,7 +212,7 @@ def alias(dev, new_alias):
         click.echo(f"Setting alias to {new_alias}")
         dev.sync.set_alias(new_alias)
 
-    click.echo(f"Alias: {dev.sync.get_alias()}")
+    click.echo(f"Alias: {dev.alias}")
 
 
 @cli.command()
@@ -243,7 +238,7 @@ def raw_command(dev: SmartDevice, module, command, parameters):
 def emeter(dev, year, month, erase):
     """Query emeter for historical consumption."""
     click.echo(click.style("== Emeter ==", bold=True))
-    if not dev.sync.get_has_emeter():
+    if not dev.sync.has_emeter():
         click.echo("Device has no emeter")
         return
 
@@ -278,7 +273,7 @@ def brightness(dev, brightness):
         click.echo("This device does not support brightness.")
         return
     if brightness is None:
-        click.echo("Brightness: %s" % dev.sync.get_brightness())
+        click.echo("Brightness: %s" % dev.sync.brightness)
     else:
         click.echo("Setting brightness to %s" % brightness)
         dev.sync.set_brightness(brightness)
@@ -292,14 +287,14 @@ def brightness(dev, brightness):
 def temperature(dev: SmartBulb, temperature):
     """Get or set color temperature."""
     if temperature is None:
-        click.echo(f"Color temperature: {dev.sync.get_color_temp()}")
+        click.echo(f"Color temperature: {dev.sync.color_temp}")
         valid_temperature_range = dev.sync.get_valid_temperature_range()
         if valid_temperature_range != (0, 0):
             click.echo("(min: {}, max: {})".format(*valid_temperature_range))
         else:
             click.echo(
                 "Temperature range unknown, please open a github issue"
-                f" or a pull request for model '{dev.sync.get_model()}'"
+                f" or a pull request for model '{dev.model}'"
             )
     else:
         click.echo(f"Setting color temperature to {temperature}")
@@ -315,7 +310,7 @@ def temperature(dev: SmartBulb, temperature):
 def hsv(dev, ctx, h, s, v):
     """Get or set color in HSV. (Bulb only)."""
     if h is None or s is None or v is None:
-        click.echo("Current HSV: %s %s %s" % dev.sync.get_hsv())
+        click.echo("Current HSV: %s %s %s" % dev.hsv)
     elif s is None or v is None:
         raise click.BadArgumentUsage("Setting a color requires 3 values.", ctx)
     else:
