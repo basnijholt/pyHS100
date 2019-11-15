@@ -1,6 +1,4 @@
-"""
-pyHS100
-Python library supporting TP-Link Smart Plugs/Switches (HS100/HS110/Hs200).
+"""Python library supporting TP-Link Smart Home devices.
 
 The communication protocol was reverse engineered by Lubomir Stroetmann and
 Tobias Esser in 'Reverse Engineering the TP-Link HS110':
@@ -14,13 +12,15 @@ You may obtain a copy of the license at
 http://www.apache.org/licenses/LICENSE-2.0
 """
 import asyncio
+import functools
+import inspect
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, Optional
 
-from .protocol import TPLinkSmartHomeProtocol
+from pyHS100.protocol import TPLinkSmartHomeProtocol
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -91,6 +91,8 @@ class SmartDevice:
         protocol: Optional[TPLinkSmartHomeProtocol] = None,
         context: str = None,
         cache_ttl: int = 3,
+        *,
+        ioloop=None,
     ) -> None:
         """Create a new SmartDevice instance.
 
@@ -101,7 +103,7 @@ class SmartDevice:
         if protocol is None:  # pragma: no cover
             protocol = TPLinkSmartHomeProtocol()
         self.protocol = protocol
-        self.emeter_type = "emeter"  # type: str
+        self.emeter_type = "emeter"
         self.context = context
         self.num_children = 0
         self.cache_ttl = timedelta(seconds=cache_ttl)
@@ -111,11 +113,14 @@ class SmartDevice:
             self.context,
             self.cache_ttl,
         )
-        self.cache = defaultdict(lambda: defaultdict(lambda: None))
+        self.cache = defaultdict(lambda: defaultdict(lambda: None))  # type: ignore
         self._device_type = DeviceType.Unknown
+        self.ioloop = ioloop or asyncio.get_event_loop()
+        self.sync = SyncSmartDevice(self, ioloop=self.ioloop)
 
     def _result_from_cache(self, target, cmd) -> Optional[Dict]:
         """Return query result from cache if still fresh.
+
         Only results from commands starting with `get_` are considered cacheable.
 
         :param target: Target system
@@ -140,7 +145,7 @@ class SmartDevice:
         return None
 
     def _insert_to_cache(self, target: str, cmd: str, response: Dict) -> None:
-        """Internal function to add response to cache.
+        """Add response for a given command to the cache.
 
         :param target: Target system
         :param cmd: Command
@@ -161,9 +166,8 @@ class SmartDevice:
         :rtype: dict
         :raises SmartDeviceException: if command was not executed correctly
         """
-        if self.context is None:
-            request = {target: {cmd: arg}}
-        else:
+        request: Dict[str, Any] = {target: {cmd: arg}}
+        if self.context is not None:
             request = {"context": {"child_ids": [self.context]}, target: {cmd: arg}}
 
         try:
@@ -205,17 +209,7 @@ class SmartDevice:
         """
         raise NotImplementedError()
 
-    @property
-    def sys_info(self) -> Dict[str, Any]:
-        """Return the complete system information.
-
-        :return: System information dict.
-        :rtype: dict
-        """
-
-        return asyncio.run(self.get_sys_info())
-
-    async def get_sys_info(self) -> Dict:
+    async def get_sys_info(self) -> Dict[str, Any]:
         """Retrieve system information.
 
         :return: sysinfo
@@ -402,7 +396,9 @@ class SmartDevice:
         if "mac" in sys_info:
             return str(sys_info["mac"])
         elif "mic_mac" in sys_info:
-            return ":".join(format(s, "02x") for s in bytes.fromhex(sys_info["mic_mac"]))
+            return ":".join(
+                format(s, "02x") for s in bytes.fromhex(sys_info["mic_mac"])
+            )
 
         raise SmartDeviceException(
             "Unknown mac, please submit a bug report with sys_info output."
@@ -417,11 +413,10 @@ class SmartDevice:
         await self._query_helper("system", "set_mac_addr", {"mac": mac})
 
     async def get_emeter_realtime(self) -> EmeterStatus:
-        """Retrive current energy readings.
+        """Retrieve current energy readings.
 
         :returns: current readings or False
         :rtype: dict, None
-                  None if device has no energy meter or error occurred
         :raises SmartDeviceException: on error
         """
         if not await self.get_has_emeter():
@@ -439,7 +434,6 @@ class SmartDevice:
                       month)
         :param kwh: return usage in kWh (default: True)
         :return: mapping of day of month to value
-                 None if device has no energy meter or error occurred
         :rtype: dict
         :raises SmartDeviceException: on error
         """
@@ -470,7 +464,6 @@ class SmartDevice:
         :param year: year for which to retrieve statistics (default: this year)
         :param kwh: return usage in kWh (default: True)
         :return: dict: mapping of month to value
-                 None if device has no energy meter
         :rtype: dict
         :raises SmartDeviceException: on error
         """
@@ -495,8 +488,6 @@ class SmartDevice:
         """Erase energy meter statistics.
 
         :return: True if statistics were deleted
-                 False if device has no energy meter.
-        :rtype: bool
         :raises SmartDeviceException: on error
         """
         if not await self.get_has_emeter():
@@ -504,21 +495,16 @@ class SmartDevice:
 
         await self._query_helper(self.emeter_type, "erase_emeter_stat", None)
 
-        # As query_helper raises exception in case of failure, we have
-        # succeeded when we are this far.
-        return True
-
     async def current_consumption(self) -> Optional[float]:
         """Get the current power consumption in Watt.
 
         :return: the current power consumption in Watts.
-                 None if device has no energy meter.
         :raises SmartDeviceException: on error
         """
         if not await self.get_has_emeter():
             raise SmartDeviceException("Device has no emeter")
 
-        response = EmeterStatus(self.get_emeter_realtime())
+        response = EmeterStatus(await self.get_emeter_realtime())
         return response["power"]
 
     async def reboot(self, delay=1) -> None:
@@ -572,30 +558,61 @@ class SmartDevice:
 
     @property
     def is_bulb(self) -> bool:
+        """Return True if the device is a bulb."""
         return self._device_type == DeviceType.Bulb
 
     @property
     def is_plug(self) -> bool:
+        """Return True if the device is a plug."""
         return self._device_type == DeviceType.Plug
 
     @property
     def is_strip(self) -> bool:
+        """Return True if the device is a strip."""
         return self._device_type == DeviceType.Strip
 
-    @property
-    def is_dimmable(self):
+    async def is_dimmable(self):
+        """Return  True if the device is dimmable."""
         return False
 
     @property
     def is_variable_color_temp(self) -> bool:
+        """Return True if the device supports color temperature."""
         return False
 
     def __repr__(self):
         return "<%s model %s at %s (%s), is_on: %s - dev specific: %s>" % (
             self.__class__.__name__,
-            asyncio.run(self.get_model()),
+            self.sync.get_model(),
             self.host,
-            asyncio.run(self.get_alias()),
-            asyncio.run(self.is_on()),
-            asyncio.run(self.get_state_information()),
+            self.sync.get_alias(),
+            self.sync.is_on(),
+            self.sync.get_state_information(),
         )
+
+
+class SyncSmartDevice:
+    """A synchronous SmartDevice speaker class.
+    This has the same methods as `SyncSmartDevice`, however, it wraps all async
+    methods and call them in a blocking way.
+
+    Taken from https://github.com/basnijholt/media_player.kef/
+    """
+
+    def __init__(self, async_device, ioloop):
+        self.async_device = async_device
+        self.ioloop = ioloop
+
+    def __getattr__(self, attr):
+        method = getattr(self.async_device, attr)
+        if method is None:
+            raise AttributeError(f"'SyncSmartDevice' object has no attribute '{attr}.'")
+        if inspect.iscoroutinefunction(method):
+
+            @functools.wraps(method)
+            def wrapped(*args, **kwargs):
+                return self.ioloop.run_until_complete(method(*args, **kwargs))
+
+            return wrapped
+        else:
+            return method
